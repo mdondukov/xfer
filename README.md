@@ -198,12 +198,12 @@ xfer copy D:\ --to E:\transfer --only-useful --include-ext 1cd,dt
 
 | Category | Extensions |
 |---|---|
-| Documents | pdf, doc(x), rtf, odt, txt, md, xls(x), ods, csv, ppt(x), odp, vsd(x), pub, xps, one, pages, numbers, key, htm(l), mht, sig, p7s... |
+| Documents | pdf, doc(x), rtf, odt, txt, md, xls(x), ods, csv, ppt(x), pps(m), odp, vsd(x), pub, xps, one, pages, numbers, key, htm(l), mht, sig, p7s, wbk; databases and reports accdb, mdb, pbix, twb(x), mpp; mind maps mm, xmind... |
 | Books | djvu, epub, fb2, mobi, azw3, chm, cbr, cbz |
 | Photos | jpg, png, gif, bmp, tif, webp, heic, avif, svg, camera RAW (dng, cr2, cr3, nef, arw, orf, rw2, raf...), xmp |
 | Video | mp4, mov, avi, mkv, wmv, mpg, ts, mts, m2ts, vob, 3gp, webm... and subtitles srt, ass, sub, vtt |
 | Audio | mp3, m4a, aac, wav, flac, ogg, opus, wma, aiff, amr, ape, mid |
-| Mail & contacts | pst, eml, msg, mbox, vcf, ics |
+| Mail & contacts | pst, eml, msg, mbox, vcf, ics, contact |
 | Design & CAD | psd, ai, eps, indd, cdr, xcf, sketch, fig, dwg, dxf, skp |
 | Archives | zip, rar, 7z, tar, gz, bz2, xz |
 

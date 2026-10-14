@@ -39,9 +39,15 @@ const DOCUMENTS: &[&str] = &[
     // spreadsheets
     "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm", "ods", "ots", "csv", "numbers",
     // presentations
-    "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx", "odp", "otp", "key",
+    "ppt", "pptx", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm", "odp", "otp", "key",
     // other office formats
     "odg", "vsd", "vsdx", "pub", "xps", "oxps", "one", "enex",
+    // Word backup copies
+    "wbk",
+    // personal databases, BI reports and project plans
+    "accdb", "mdb", "pbix", "twb", "twbx", "mpp",
+    // mind maps
+    "mm", "xmind",
     // saved web pages
     "htm", "html", "mht", "mhtml",
     // detached digital signatures
@@ -75,7 +81,7 @@ const AUDIO: &[&str] = &[
     "ape", "wv", "mid", "midi", "3ga",
 ];
 
-const MAIL: &[&str] = &["pst", "eml", "msg", "mbox", "vcf", "ics"];
+const MAIL: &[&str] = &["pst", "eml", "msg", "mbox", "vcf", "ics", "contact"];
 
 const DESIGN: &[&str] = &[
     "psd", "psb", "ai", "eps", "indd", "idml", "cdr", "xcf", "kra", "afphoto", "afdesign",
@@ -253,6 +259,8 @@ mod tests {
         let f = filter(true);
         assert!(matches!(f.decide(Path::new("a/Фото.JPG")), Decision::Keep(Some(Category::Photos))));
         assert!(matches!(f.decide(Path::new("a/base.1cd")), Decision::Keep(Some(Category::Custom))));
+        assert!(matches!(f.decide(Path::new("a/CAYEN.accdb")), Decision::Keep(Some(Category::Documents))));
+        assert!(matches!(f.decide(Path::new("a/Anna.contact")), Decision::Keep(Some(Category::Mail))));
         assert!(matches!(f.decide(Path::new("a/setup.exe")), Decision::Drop { .. }));
         assert!(matches!(f.decide(Path::new("a/Makefile")), Decision::Drop { .. }));
     }
