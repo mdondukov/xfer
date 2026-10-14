@@ -108,7 +108,7 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     report::sources(&mut text, &roots);
     report::disks_section(&mut text, &roots, &source_disks, Some((&target_arg, &target_disk)));
     text.line(format!("Copy mode: {}", mode_text(mode, args, &source_disks)));
-    report::scan_section(&mut text, &scan, filter.only_useful, !args.dry_run);
+    report::scan_section(&mut text, &scan, filter.only_useful);
     report::categories_section(&mut text, files);
     if let Some(d) = &dedup {
         report::dup_section(&mut text, files, &d.groups, &d.keepers, &d.folders, scan.total().bytes);
@@ -121,22 +121,59 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     ));
     print!("{}", text.0);
 
+    let mut hash_of: HashMap<usize, Hash> = HashMap::new();
+    if let Some(d) = &dedup {
+        for g in &d.groups {
+            for &i in &g.files {
+                hash_of.insert(i, g.hash);
+            }
+        }
+    }
+    let hex = |i: usize| hash_of.get(&i).map(to_hex).unwrap_or_default();
+    let mut errors: Vec<String> = scan.errors.clone();
+    if let Some(d) = &dedup {
+        errors.extend(d.errors.iter().cloned());
+    }
+
+    // The dry run leaves the target untouched: its reports go to the current folder.
     if args.dry_run {
+        let dir = report::unique_dir(Path::new(&format!("xfer-dryrun-{}", report::timestamp())))?;
+        let dest_of = |i: usize| dest_path(&target_arg, &roots, &relative, &files[i]);
+        let mut w = report::excel_csv(&dir.join("plan.csv"))?;
+        w.write_record(MANIFEST_HEADER)?;
+        for &i in &to_copy {
+            let f = &files[i];
+            w.write_record([
+                "would-copy".to_string(),
+                paths::display(&f.path),
+                paths::display(&dest_of(i)),
+                f.size.to_string(),
+                hex(i),
+                String::new(),
+            ])?;
+        }
+        write_duplicates(&mut w, files, &dup_of, &dest_of, &hex)?;
+        w.flush()?;
+        fs::write(dir.join("summary.txt"), &text.0)?;
+        report::write_filtered(&dir, &scan)?;
+        report::write_errors(&dir, &errors)?;
+        let dir = fs::canonicalize(&dir)?;
         println!("\nDry run (--dry-run): nothing was copied.");
+        println!("Reports: {}", paths::display(&dir));
+        println!("  plan.csv - what would be copied where, and which files are skipped as duplicates");
+        if !scan.filtered.is_empty() {
+            println!("  filtered.csv - every file left out by the filter");
+        }
+        if !errors.is_empty() {
+            println!("  errors.txt - files that could not be read");
+        }
         return Ok(());
     }
 
     fs::create_dir_all(&target_arg)
         .with_context(|| format!("cannot create {}", target_arg.display()))?;
     let target = fs::canonicalize(&target_arg)?;
-    let dest_of = |i: usize| {
-        let f = &files[i];
-        if relative[f.root] {
-            paths::relative_path(&target, &roots[f.root], &f.path)
-        } else {
-            paths::mirror_path(&target, &f.path)
-        }
-    };
+    let dest_of = |i: usize| dest_path(&target, &roots, &relative, &files[i]);
     let plan: Vec<(usize, PathBuf)> = to_copy.iter().map(|&i| (i, dest_of(i))).collect();
 
     // A rerun only copies what is not there yet. Checked sequentially on a hard drive.
@@ -203,27 +240,13 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
         })
         .collect();
 
-    let mut hash_of: HashMap<usize, Hash> = HashMap::new();
-    if let Some(d) = &dedup {
-        for g in &d.groups {
-            for &i in &g.files {
-                hash_of.insert(i, g.hash);
-            }
-        }
-    }
-    let hex = |i: usize| hash_of.get(&i).map(to_hex).unwrap_or_default();
-
-    let mut errors: Vec<String> = scan.errors.clone();
-    if let Some(d) = &dedup {
-        errors.extend(d.errors.iter().cloned());
-    }
     let mut copied = scan::Stat::default();
     let mut skipped = scan::Stat::default();
     let mut failed = 0u64;
     let mut interrupted = scan::Stat::default();
 
     let mut w = report::excel_csv(&run_dir.join("manifest.csv"))?;
-    w.write_record(["status", "source", "destination", "size", "hash", "duplicate_of"])?;
+    w.write_record(MANIFEST_HEADER)?;
     for ((i, dest), outcome) in plan.iter().zip(&outcomes) {
         let f = &files[*i];
         let status = match outcome {
@@ -254,18 +277,7 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
             String::new(),
         ])?;
     }
-    for (i, keeper) in dup_of.iter().enumerate() {
-        let Some(k) = *keeper else { continue };
-        let f = &files[i];
-        w.write_record([
-            "duplicate".to_string(),
-            paths::display(&f.path),
-            paths::display(&dest_of(k)),
-            f.size.to_string(),
-            hex(i),
-            paths::display(&files[k].path),
-        ])?;
-    }
+    write_duplicates(&mut w, files, &dup_of, &dest_of, &hex)?;
     w.flush()?;
 
     text.line(String::new());
@@ -329,4 +341,39 @@ fn mode_text(mode: CopyMode, args: &CopyArgs, sources: &[Disk]) -> String {
             args.threads, args.large_threads
         ),
     }
+}
+
+const MANIFEST_HEADER: [&str; 6] = ["status", "source", "destination", "size", "hash", "duplicate_of"];
+
+/// Where a file lands: the full path with the drive letter, or, for a transfer
+/// folder (second hop), the path relative to its root.
+fn dest_path(target: &Path, roots: &[PathBuf], relative: &[bool], f: &FileEntry) -> PathBuf {
+    if relative[f.root] {
+        paths::relative_path(target, &roots[f.root], &f.path)
+    } else {
+        paths::mirror_path(target, &f.path)
+    }
+}
+
+/// Manifest rows for skipped duplicates: where the kept copy went and what it was.
+fn write_duplicates<W: std::io::Write>(
+    w: &mut csv::Writer<W>,
+    files: &[FileEntry],
+    dup_of: &[Option<usize>],
+    dest_of: &dyn Fn(usize) -> PathBuf,
+    hex: &dyn Fn(usize) -> String,
+) -> Result<()> {
+    for (i, keeper) in dup_of.iter().enumerate() {
+        let Some(k) = *keeper else { continue };
+        let f = &files[i];
+        w.write_record([
+            "duplicate".to_string(),
+            paths::display(&f.path),
+            paths::display(&dest_of(k)),
+            f.size.to_string(),
+            hex(i),
+            paths::display(&files[k].path),
+        ])?;
+    }
+    Ok(())
 }

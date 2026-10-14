@@ -60,6 +60,16 @@ Duplicates:
 To copy: 140,830 files, 249.4 GB -> E:\transfer
 ```
 
+The dry run leaves the target untouched and saves its reports in `xfer-dryrun-<time>` in the
+current folder:
+
+- `plan.csv` - every file that would be copied and where, plus every duplicate that would be
+  skipped and which file it duplicates;
+- `filtered.csv` - every file the filter left out, to spot useful extensions missing from the
+  whitelist;
+- `errors.txt` - files that could not be read;
+- `summary.txt` - the summary above.
+
 Check that the numbers make sense, then run the same command without `--dry-run`:
 
 ```
@@ -177,8 +187,8 @@ Move the file back by hand.
 
 ### 7. Tune the whitelist
 
-Run with `--dry-run` and look at the "Filtered out" section, or at `filtered.csv` after a real
-run. If something useful is there, add its extension:
+Run with `--dry-run` and look at the "Filtered out" section and at `filtered.csv` in the
+`xfer-dryrun-<time>` report folder. If something useful is there, add its extension:
 
 ```
 xfer copy D:\ --to E:\transfer --only-useful --include-ext 1cd,dt

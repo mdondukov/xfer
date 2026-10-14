@@ -97,9 +97,6 @@ impl Text {
     }
 }
 
-/// Unreadable files listed in a dry run, where no errors.txt is written.
-const ERRORS_SHOWN: usize = 20;
-
 /// "Disks:" with the type of each source volume and of the target.
 pub fn disks_section(
     out: &mut Text,
@@ -128,9 +125,7 @@ pub fn sources(out: &mut Text, roots: &[PathBuf]) {
     }
 }
 
-/// `errors_file`: whether errors.txt gets written; if not (dry run), the
-/// unreadable files are listed right here.
-pub fn scan_section(out: &mut Text, scan: &ScanResult, only_useful: bool, errors_file: bool) {
+pub fn scan_section(out: &mut Text, scan: &ScanResult, only_useful: bool) {
     let total = scan.total();
     let filtered = scan.filtered_total();
     out.line(format!("Found: {}", stat(total)));
@@ -163,18 +158,7 @@ pub fn scan_section(out: &mut Text, scan: &ScanResult, only_useful: bool, errors
         ));
     }
     if !scan.errors.is_empty() {
-        let n = scan.errors.len();
-        if errors_file {
-            out.line(format!("Unreadable: {} (see errors.txt)", num(n as u64)));
-        } else {
-            out.line(format!("Unreadable: {}", num(n as u64)));
-            for e in scan.errors.iter().take(ERRORS_SHOWN) {
-                out.line(format!("  {e}"));
-            }
-            if n > ERRORS_SHOWN {
-                out.line(format!("  ... and {} more", num((n - ERRORS_SHOWN) as u64)));
-            }
-        }
+        out.line(format!("Unreadable: {} (see errors.txt)", num(scan.errors.len() as u64)));
     }
 }
 

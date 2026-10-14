@@ -68,7 +68,7 @@ pub fn run(args: &DupesArgs, no_cache: bool) -> Result<()> {
     let mut text = Text::default();
     report::sources(&mut text, &roots);
     report::disks_section(&mut text, &roots, &disks, None);
-    report::scan_section(&mut text, &scan, filter.only_useful, true);
+    report::scan_section(&mut text, &scan, filter.only_useful);
     report::dup_section(&mut text, files, &d.groups, &d.keepers, &d.folders, scan.total().bytes);
     print!("{}", text.0);
 
