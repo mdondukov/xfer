@@ -66,14 +66,16 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
         }
     }
 
-    if !args.no_av_check {
-        av::check();
-    }
+    // The check takes a few seconds, so it runs while we scan.
+    let av_check = (!args.no_av_check).then(|| thread::spawn(av::check));
 
     let stages = 1 + if args.dedup { 3 } else { 0 } + if args.dry_run { 0 } else { 1 };
     progress::set_stages(stages);
     let filter = Filter::new(&args.filter);
     let scan = scan::scan(&roots, &filter, &exclude);
+    if let Some(text) = av_check.and_then(|h| h.join().ok()).flatten() {
+        eprintln!("{text}");
+    }
     let files = &scan.files;
     let dedup = if args.dedup {
         Some(dupes::analyze(files, &roots, &args.prefer, no_cache)?)

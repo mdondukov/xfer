@@ -16,16 +16,19 @@ pub struct Status {
     pub third_party: Vec<String>,
 }
 
-/// Prints advice if real-time scanning is likely to slow copying down.
-/// Silent when the check is impossible (non-Windows, Windows Server, no PowerShell).
-pub fn check() {
+/// Advice if real-time scanning is likely to slow copying down. `None` when
+/// nothing is scanning or the check is impossible (non-Windows, Windows Server,
+/// no PowerShell). Takes a few seconds (PowerShell startup), so callers run it
+/// in the background.
+pub fn check() -> Option<String> {
     #[cfg(windows)]
-    if let Some(out) = windows::query() {
+    {
+        let out = windows::query()?;
         let exe = std::env::current_exe().unwrap_or_else(|_| "xfer.exe".into());
-        if let Some(text) = advice(&parse(&out), &exe) {
-            eprintln!("{text}");
-        }
+        advice(&parse(&out), &exe)
     }
+    #[cfg(not(windows))]
+    None
 }
 
 /// Parses the `KEY=value` lines printed by the PowerShell query.
