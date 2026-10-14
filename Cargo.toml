@@ -2,6 +2,9 @@
 name = "xfer"
 version = "0.1.0"
 edition = "2024"
+description = "Move documents, photos and videos between Windows PCs and clean up duplicates"
+license = "MIT"
+repository = "https://github.com/mdondukov/xfer"
 
 [dependencies]
 anyhow = "1.0.104"

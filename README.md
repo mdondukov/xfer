@@ -250,3 +250,7 @@ cargo build --release --target x86_64-pc-windows-gnu   # on macOS, needs mingw-w
 
 In `cmd`, don't end a quoted path with a backslash: `"D:\Photos\"` reaches the program as
 `D:\Photos"`. xfer repairs this, but `"D:\Photos"` is safer.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
