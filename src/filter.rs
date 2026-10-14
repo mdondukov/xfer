@@ -72,6 +72,10 @@ const VIDEO: &[&str] = &[
     "mp4", "m4v", "mov", "avi", "mkv", "wmv", "flv", "f4v", "webm", "mpg", "mpeg", "mpe", "m2v",
     "ts", "mts", "m2ts", "vob", "3gp", "3g2", "ogv", "asf", "rm", "rmvb", "divx", "dv", "mxf",
     "insv",
+    // MPEG-2 from JVC/Panasonic camcorders, MPEG-2 program streams
+    "mod", "tod", "m2p",
+    // Zoom recordings that were never converted to mp4
+    "zoom",
     // subtitles
     "srt", "ass", "ssa", "sub", "vtt",
 ];
@@ -261,6 +265,8 @@ mod tests {
         assert!(matches!(f.decide(Path::new("a/base.1cd")), Decision::Keep(Some(Category::Custom))));
         assert!(matches!(f.decide(Path::new("a/CAYEN.accdb")), Decision::Keep(Some(Category::Documents))));
         assert!(matches!(f.decide(Path::new("a/Anna.contact")), Decision::Keep(Some(Category::Mail))));
+        assert!(matches!(f.decide(Path::new("a/MOV001.MOD")), Decision::Keep(Some(Category::Video))));
+        assert!(matches!(f.decide(Path::new("a/double_click_to_convert_01.zoom")), Decision::Keep(Some(Category::Video))));
         assert!(matches!(f.decide(Path::new("a/setup.exe")), Decision::Drop { .. }));
         assert!(matches!(f.decide(Path::new("a/Makefile")), Decision::Drop { .. }));
     }
