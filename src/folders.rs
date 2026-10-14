@@ -248,6 +248,7 @@ mod tests {
             size,
             mtime: UNIX_EPOCH,
             category: None,
+            pos: 0,
         }
     }
 

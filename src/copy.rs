@@ -49,8 +49,6 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     // The check takes a few seconds, so it runs while we scan.
     let av_check = (!args.no_av_check).then(|| thread::spawn(av::check));
 
-    let stages = 1 + if args.dedup { 3 } else { 0 } + if args.dry_run { 0 } else { 1 };
-    progress::set_stages(stages);
     let source_disks: Vec<Disk> = roots.iter().map(|r| disk::probe(r)).collect();
     let target_disk = disk::probe(&target_arg);
     let mode = match args.copy_mode {
@@ -64,6 +62,14 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
         m => m,
     };
 
+    // Locating files on hard drives pays off only if they are read afterwards.
+    let locate = source_disks.iter().any(Disk::sequential) && (args.dedup || !args.dry_run);
+    let stages = 1
+        + usize::from(locate)
+        + if args.dedup { 3 } else { 0 }
+        + if args.dry_run { 0 } else { 1 };
+    progress::set_stages(stages);
+
     // Shown up front, so a misdetected disk is visible before hours of work.
     let mut head = Text::default();
     report::disks_section(&mut head, &roots, &source_disks, Some((&target_arg, &target_disk)));
@@ -71,9 +77,12 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     eprint!("{}", head.0);
 
     let filter = Filter::new(&args.filter);
-    let scan = scan::scan(&roots, &source_disks, &filter, &exclude);
+    let mut scan = scan::scan(&roots, &source_disks, &filter, &exclude);
     if let Some(text) = av_check.and_then(|h| h.join().ok()).flatten() {
         eprintln!("{text}");
+    }
+    if locate {
+        disk::locate(&mut scan.files, &source_disks);
     }
     let files = &scan.files;
     let dedup = if args.dedup {
@@ -161,13 +170,19 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     let pending: Vec<usize> = (0..plan.len()).filter(|&k| !already[k]).collect();
     let results = match mode {
         CopyMode::Pipeline => {
-            // One reader per source disk; plan order is scan order.
+            // One reader per source disk, each in on-disk order (then scan order).
             let mut readers: BTreeMap<String, Vec<usize>> = BTreeMap::new();
             for &k in &pending {
                 let d = &source_disks[files[plan[k].0].root];
                 readers.entry(d.key()).or_default().push(k);
             }
-            let readers: Vec<Vec<usize>> = readers.into_values().collect();
+            let readers: Vec<Vec<usize>> = readers
+                .into_values()
+                .map(|mut jobs| {
+                    jobs.sort_by_key(|&k| (files[plan[k].0].pos, k));
+                    jobs
+                })
+                .collect();
             copier::pipeline(files, &plan, &readers, need)
         }
         _ => {

@@ -20,6 +20,8 @@ pub struct FileEntry {
     pub size: u64,
     pub mtime: SystemTime,
     pub category: Option<Category>,
+    /// On-disk position for reading hard drives in one sweep; see `disk::locate`.
+    pub pos: u64,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -196,6 +198,7 @@ fn scan_root(
                 root: ri,
                 size,
                 category,
+                pos: 0,
             }),
         }
     }

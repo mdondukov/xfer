@@ -252,6 +252,15 @@ sequential access costs an SSD little while parallel access hurts an HDD a lot.
 The same rule applies elsewhere: sources on different physical disks are scanned in parallel,
 and with `--dedup` each hard drive is hashed by a single thread (SSDs use `--jobs` threads).
 
+On hard drives xfer also:
+
+- reads files in their on-disk order rather than folder order: a `Locating` stage asks Windows
+  where each file starts on the platter (the same query the defragmenter uses), so the head
+  sweeps across the disk once instead of jumping between folders;
+- hashes same-size files under 4 MB in full right away: the quick head-and-tail check costs two
+  seeks, about as much as reading such a file outright;
+- opens files with the sequential-read hint, so Windows reads ahead in large blocks.
+
 Large files are written into a preallocated target file, which limits fragmentation.
 
 Rough expectations for a portable USB hard drive: large files at 80-120 MB/s, small files at a

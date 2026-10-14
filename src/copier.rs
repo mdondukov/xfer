@@ -9,6 +9,7 @@
 //!   the current one. Each disk sees a single sequential stream, so total time
 //!   approaches that of the slower disk rather than the sum of both.
 
+use crate::disk;
 use crate::filter::PARTIAL_SUFFIX;
 use crate::progress::{self, Stage};
 use crate::report::{human, num};
@@ -187,7 +188,7 @@ enum Msg {
 }
 
 /// Copies with one reader per entry of `readers` (each a list of plan indices on
-/// one source disk, in scan order) and a single writer; see the module docs.
+/// one source disk, in reading order) and a single writer; see the module docs.
 pub fn pipeline(
     files: &[FileEntry],
     plan: &Plan,
@@ -240,7 +241,7 @@ fn read_one(path: &Path, k: usize, tx: &SyncSender<Msg>, cancelled: &AtomicBool)
         tx.send(m)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer stopped"))
     };
-    let mut f = File::open(path)?;
+    let mut f = disk::open_sequential(path)?;
     let size = f.metadata()?.len();
     if size <= PIPE_CHUNK as u64 {
         let mut data = Vec::with_capacity(size as usize);
@@ -442,7 +443,7 @@ fn stream_file(
     mtime: SystemTime,
     on_progress: impl Fn(u64),
 ) -> io::Result<()> {
-    let mut input = File::open(src)?;
+    let mut input = disk::open_sequential(src)?;
     let size = input.metadata()?.len();
     let (mut output, tmp) = start_file(dest, size)?;
     let res = (|| {
@@ -494,6 +495,7 @@ mod tests {
                 size: size as u64,
                 mtime: UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000 + n as u64),
                 category: None,
+                pos: 0,
             });
             plan.push((n, dst.join("sub").join(format!("f{n}.bin"))));
         }

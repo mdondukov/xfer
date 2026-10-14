@@ -2,15 +2,13 @@
 //! Each stage reads from disk only what the previous one did not rule out.
 
 use crate::cache::HashCache;
-use crate::disk::Disk;
+use crate::disk::{self, Disk};
 use crate::paths;
 use crate::progress::{self, Stage};
 use crate::report;
 use crate::scan::FileEntry;
-use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -18,8 +16,11 @@ use std::path::{Path, PathBuf};
 pub type Hash = [u8; 32];
 
 const PARTIAL_BLOCK: u64 = 16 * 1024;
+const PARTIAL_MIN_HDD: u64 = 4 * 1024 * 1024;
 const HASH_CHUNK: usize = 1024 * 1024;
 /// Files smaller than this are hashed in full right away: two passes cost more than one.
+/// On a hard drive the quick check costs two seeks, about as much as reading a few
+/// MB outright, so there it only pays off for larger files.
 const PARTIAL_MIN: u64 = 4 * PARTIAL_BLOCK;
 
 pub struct DupGroup {
@@ -43,7 +44,7 @@ pub fn hash_file(path: &Path) -> io::Result<Hash> {
 /// Hashes in 1 MB chunks, reporting progress after each one, so a multi-GB video
 /// moves the bar smoothly and Ctrl+C doesn't have to wait for it to finish.
 fn hash_file_with(path: &Path, on_progress: impl Fn(u64)) -> io::Result<Hash> {
-    let mut f = File::open(path)?;
+    let mut f = disk::open_sequential(path)?;
     let mut buf = vec![0u8; HASH_CHUNK];
     let mut h = blake3::Hasher::new();
     loop {
@@ -105,7 +106,11 @@ pub fn find_duplicates(
         if idx.len() < 2 {
             continue;
         }
-        if size < PARTIAL_MIN {
+        // Decided per size group: all members must go through the same stages to
+        // be comparable. A group touching any SSD keeps the SSD threshold.
+        let all_hdd = idx.iter().all(|&i| disks[files[i].root].sequential());
+        let min = if all_hdd { PARTIAL_MIN_HDD } else { PARTIAL_MIN };
+        if size < min {
             small += idx.len();
             need_full.extend(idx);
         } else {
@@ -116,7 +121,7 @@ pub fn find_duplicates(
     // Ctrl+C stops after the files in progress; what was hashed stays in the cache.
     progress::set_graceful(true);
     let stage = Stage::count("Quick check", need_partial.len() as u64);
-    let partial = per_disk(&need_partial, files, disks, |i| {
+    let partial = disk::per_disk(&need_partial, files, disks, |i| {
         if progress::interrupted() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped by Ctrl+C"));
         }
@@ -160,7 +165,7 @@ pub fn find_duplicates(
     let hashed = AtomicU64::new(0);
     let todo_count = report::num(todo.len() as u64);
     stage.bar().set_message(format!("0/{todo_count} files"));
-    let computed = per_disk(&todo, files, disks, |i| {
+    let computed = disk::per_disk(&todo, files, disks, |i| {
         let f = &files[i];
         let r = hash_file_with(&f.path, |n| stage.bar().inc(n));
         if let Ok(h) = &r {
@@ -201,41 +206,6 @@ pub fn find_duplicates(
         .collect();
     groups.sort_by(|a, b| b.wasted().cmp(&a.wasted()).then(a.hash.cmp(&b.hash)));
     (groups, errors)
-}
-
-/// Runs `f` over files grouped by physical disk: disks in parallel, each hard
-/// drive sequentially in scan order (neighbouring files tend to sit close on the
-/// platter), each SSD on the rayon pool (`--jobs`).
-fn per_disk<T, F>(idx: &[usize], files: &[FileEntry], disks: &[Disk], f: F) -> Vec<(usize, T)>
-where
-    T: Send,
-    F: Fn(usize) -> T + Sync,
-{
-    let mut groups: BTreeMap<String, (bool, Vec<usize>)> = BTreeMap::new();
-    for &i in idx {
-        let d = &disks[files[i].root];
-        groups.entry(d.key()).or_insert((d.sequential(), Vec::new())).1.push(i);
-    }
-    let f = &f;
-    thread::scope(|s| {
-        let handles: Vec<_> = groups
-            .into_values()
-            .map(|(sequential, mut group)| {
-                s.spawn(move || {
-                    group.sort_unstable();
-                    if sequential {
-                        group.iter().map(|&i| (i, f(i))).collect::<Vec<_>>()
-                    } else {
-                        group.par_iter().map(|&i| (i, f(i))).collect()
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("hashing thread"))
-            .collect()
-    })
 }
 
 /// Which copy to keep: one under a --prefer folder; then one outside redundant
