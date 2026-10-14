@@ -2,6 +2,7 @@
 
 use crate::DupesArgs;
 use crate::cache::HashCache;
+use crate::disk::{self, Disk};
 use crate::filter::Filter;
 use crate::folders::{self, RedundantFolder};
 use crate::hashing::{self, DupGroup, to_hex};
@@ -25,12 +26,13 @@ pub struct Dedup {
 pub fn analyze(
     files: &[FileEntry],
     roots: &[PathBuf],
+    disks: &[Disk],
     prefer: &[PathBuf],
     no_cache: bool,
 ) -> Result<Dedup> {
     let prefer = paths::canonical_list(prefer)?;
     let cache = HashCache::open(no_cache);
-    let (groups, errors) = hashing::find_duplicates(files, &cache);
+    let (groups, errors) = hashing::find_duplicates(files, disks, &cache);
     let stage = Stage::spinner("Folders");
     let mut folders = folders::analyze(files, &groups, roots);
     let inside = folders::inside_redundant(files, &folders);
@@ -50,14 +52,16 @@ pub fn analyze(
 pub fn run(args: &DupesArgs, no_cache: bool) -> Result<()> {
     let roots = paths::prepare_roots(&args.paths)?;
     progress::set_stages(4);
+    let disks: Vec<Disk> = roots.iter().map(|r| disk::probe(r)).collect();
     let filter = Filter::new(&args.filter);
-    let scan = scan::scan(&roots, &filter, &[]);
+    let scan = scan::scan(&roots, &disks, &filter, &[]);
     let files = &scan.files;
-    let d = analyze(files, &roots, &args.prefer, no_cache)?;
+    let d = analyze(files, &roots, &disks, &args.prefer, no_cache)?;
 
     let mut text = Text::default();
     report::sources(&mut text, &roots);
-    report::scan_section(&mut text, &scan, filter.only_useful);
+    report::disks_section(&mut text, &roots, &disks, None);
+    report::scan_section(&mut text, &scan, filter.only_useful, true);
     report::dup_section(&mut text, files, &d.groups, &d.keepers, &d.folders, scan.total().bytes);
     print!("{}", text.0);
 

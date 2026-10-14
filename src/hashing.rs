@@ -2,12 +2,14 @@
 //! Each stage reads from disk only what the previous one did not rule out.
 
 use crate::cache::HashCache;
+use crate::disk::Disk;
 use crate::paths;
 use crate::progress::Stage;
 use crate::report;
 use crate::scan::FileEntry;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::thread;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -60,7 +62,12 @@ pub fn from_hex(s: &str) -> Option<Hash> {
 
 /// Returns groups of identical files (most wasteful first) and read errors.
 /// Empty files are never duplicates: they take no space.
-pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>, Vec<String>) {
+/// `disks[r]` is the disk of source root `r`: hard drives are read sequentially.
+pub fn find_duplicates(
+    files: &[FileEntry],
+    disks: &[Disk],
+    cache: &HashCache,
+) -> (Vec<DupGroup>, Vec<String>) {
     let mut errors = Vec::new();
 
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -85,14 +92,11 @@ pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>
     }
 
     let stage = Stage::count("Quick check", need_partial.len() as u64);
-    let partial: Vec<(usize, io::Result<Hash>)> = need_partial
-        .par_iter()
-        .map(|&i| {
-            let r = partial_hash(&files[i].path, files[i].size);
-            stage.bar().inc(1);
-            (i, r)
-        })
-        .collect();
+    let partial = per_disk(&need_partial, files, disks, |i| {
+        let r = partial_hash(&files[i].path, files[i].size);
+        stage.bar().inc(1);
+        r
+    });
     let mut by_partial: HashMap<(u64, Hash), Vec<usize>> = HashMap::new();
     for (i, r) in partial {
         match r {
@@ -125,14 +129,11 @@ pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>
 
     let total: u64 = todo.iter().map(|&i| files[i].size).sum();
     let stage = Stage::bytes("Hashing", total);
-    let computed: Vec<(usize, io::Result<Hash>)> = todo
-        .par_iter()
-        .map(|&i| {
-            let r = hash_file(&files[i].path);
-            stage.bar().inc(files[i].size);
-            (i, r)
-        })
-        .collect();
+    let computed = per_disk(&todo, files, disks, |i| {
+        let r = hash_file(&files[i].path);
+        stage.bar().inc(files[i].size);
+        r
+    });
     stage.finish(format!(
         "{} hashed, {} from cache",
         report::human(total),
@@ -164,6 +165,41 @@ pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>
         .collect();
     groups.sort_by(|a, b| b.wasted().cmp(&a.wasted()).then(a.hash.cmp(&b.hash)));
     (groups, errors)
+}
+
+/// Runs `f` over files grouped by physical disk: disks in parallel, each hard
+/// drive sequentially in scan order (neighbouring files tend to sit close on the
+/// platter), each SSD on the rayon pool (`--jobs`).
+fn per_disk<T, F>(idx: &[usize], files: &[FileEntry], disks: &[Disk], f: F) -> Vec<(usize, T)>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync,
+{
+    let mut groups: BTreeMap<String, (bool, Vec<usize>)> = BTreeMap::new();
+    for &i in idx {
+        let d = &disks[files[i].root];
+        groups.entry(d.key()).or_insert((d.sequential(), Vec::new())).1.push(i);
+    }
+    let f = &f;
+    thread::scope(|s| {
+        let handles: Vec<_> = groups
+            .into_values()
+            .map(|(sequential, mut group)| {
+                s.spawn(move || {
+                    group.sort_unstable();
+                    if sequential {
+                        group.iter().map(|&i| (i, f(i))).collect::<Vec<_>>()
+                    } else {
+                        group.par_iter().map(|&i| (i, f(i))).collect()
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("hashing thread"))
+            .collect()
+    })
 }
 
 /// Which copy to keep: one under a --prefer folder; then one outside redundant

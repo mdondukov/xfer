@@ -3,42 +3,22 @@
 use crate::CopyArgs;
 use crate::av;
 use crate::dupes;
-use crate::filter::{Filter, PARTIAL_SUFFIX};
+use crate::filter::Filter;
 use crate::hashing::{Hash, to_hex};
 use crate::paths::{self, SERVICE_DIR};
-use crate::progress::{self, Stage};
+use crate::copier::{self, Lanes, Outcome};
+use crate::disk::{self, Disk};
+use crate::progress;
 use crate::report::{self, Text, human, num};
 use crate::scan::{self, FileEntry};
 use anyhow::{Context, Result, bail};
-use filetime::FileTime;
+use crate::CopyMode;
 use rayon::prelude::*;
-use std::collections::HashMap;
-use indicatif::MultiProgress;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime};
-
-enum Outcome {
-    Copied,
-    Already,
-    Failed(String),
-    Interrupted,
-}
-
-/// Files from this size up go to the large-file lane.
-const LARGE_FILE: u64 = 16 * 1024 * 1024;
-/// Chunk size for streaming large files; also the progress granularity.
-const CHUNK: usize = 4 * 1024 * 1024;
-
-#[derive(Clone, Copy)]
-struct Lanes {
-    small: usize,
-    large: usize,
-}
 
 pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     let roots = paths::prepare_roots(&args.sources)?;
@@ -71,14 +51,27 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
 
     let stages = 1 + if args.dedup { 3 } else { 0 } + if args.dry_run { 0 } else { 1 };
     progress::set_stages(stages);
+    let source_disks: Vec<Disk> = roots.iter().map(|r| disk::probe(r)).collect();
+    let target_disk = disk::probe(&target_arg);
+    let mode = match args.copy_mode {
+        CopyMode::Auto => {
+            if source_disks.iter().chain([&target_disk]).any(Disk::sequential) {
+                CopyMode::Pipeline
+            } else {
+                CopyMode::Parallel
+            }
+        }
+        m => m,
+    };
+
     let filter = Filter::new(&args.filter);
-    let scan = scan::scan(&roots, &filter, &exclude);
+    let scan = scan::scan(&roots, &source_disks, &filter, &exclude);
     if let Some(text) = av_check.and_then(|h| h.join().ok()).flatten() {
         eprintln!("{text}");
     }
     let files = &scan.files;
     let dedup = if args.dedup {
-        Some(dupes::analyze(files, &roots, &args.prefer, no_cache)?)
+        Some(dupes::analyze(files, &roots, &source_disks, &args.prefer, no_cache)?)
     } else {
         None
     };
@@ -98,7 +91,9 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
 
     let mut text = Text::default();
     report::sources(&mut text, &roots);
-    report::scan_section(&mut text, &scan, filter.only_useful);
+    report::disks_section(&mut text, &roots, &source_disks, Some((&target_arg, &target_disk)));
+    text.line(format!("Copy mode: {}", mode_text(mode, args, &source_disks)));
+    report::scan_section(&mut text, &scan, filter.only_useful, !args.dry_run);
     report::categories_section(&mut text, files);
     if let Some(d) = &dedup {
         report::dup_section(&mut text, files, &d.groups, &d.keepers, &d.folders, scan.total().bytes);
@@ -129,11 +124,13 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
     };
     let plan: Vec<(usize, PathBuf)> = to_copy.iter().map(|&i| (i, dest_of(i))).collect();
 
-    // A rerun only copies what is not there yet.
-    let already: Vec<bool> = plan
-        .par_iter()
-        .map(|(i, dest)| same_file(dest, &files[*i]))
-        .collect();
+    // A rerun only copies what is not there yet. Checked sequentially on a hard drive.
+    let check = |(i, dest): &(usize, PathBuf)| same_file(dest, &files[*i]);
+    let already: Vec<bool> = if target_disk.sequential() {
+        plan.iter().map(check).collect()
+    } else {
+        plan.par_iter().map(check).collect()
+    };
     let need: u64 = plan
         .iter()
         .zip(&already)
@@ -155,11 +152,35 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
 
     let run_dir = report::unique_dir(&target.join(SERVICE_DIR).join(report::timestamp()))?;
 
-    let lanes = Lanes {
-        small: args.threads.into(),
-        large: args.large_threads.into(),
+    let pending: Vec<usize> = (0..plan.len()).filter(|&k| !already[k]).collect();
+    let results = match mode {
+        CopyMode::Pipeline => {
+            // One reader per source disk; plan order is scan order.
+            let mut readers: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+            for &k in &pending {
+                let d = &source_disks[files[plan[k].0].root];
+                readers.entry(d.key()).or_default().push(k);
+            }
+            let readers: Vec<Vec<usize>> = readers.into_values().collect();
+            copier::pipeline(files, &plan, &readers, need)
+        }
+        _ => {
+            let lanes = Lanes {
+                small: args.threads.into(),
+                large: args.large_threads.into(),
+            };
+            copier::parallel(files, &plan, &pending, need, lanes)
+        }
     };
-    let outcomes = copy_all(files, &plan, &already, need, lanes);
+    let outcomes: Vec<Outcome> = results
+        .into_iter()
+        .zip(&already)
+        .map(|(r, &was_there)| match r {
+            Some(o) => o,
+            None if was_there => Outcome::Already,
+            None => Outcome::Interrupted,
+        })
+        .collect();
 
     let mut hash_of: HashMap<usize, Hash> = HashMap::new();
     if let Some(d) = &dedup {
@@ -274,197 +295,17 @@ fn diff(a: SystemTime, b: SystemTime) -> Duration {
     a.duration_since(b).or_else(|_| b.duration_since(a)).unwrap_or_default()
 }
 
-/// Copies the plan in two lanes running side by side:
-/// - small files: many threads, since time goes into per-file overhead (open,
-///   create, close, antivirus); copied with `fs::copy` (`CopyFileExW` on Windows);
-/// - large files: few threads, biggest first, streamed in chunks so the progress
-///   bar moves smoothly; more parallel writes would only fragment the target.
-///
-/// Ctrl+C stops the lanes after the files in progress; large files stop mid-way.
-fn copy_all(
-    files: &[FileEntry],
-    plan: &[(usize, PathBuf)],
-    already: &[bool],
-    need: u64,
-    lanes: Lanes,
-) -> Vec<Outcome> {
-    let mut small = Vec::new();
-    let mut large = Vec::new();
-    for (k, ((i, _), done)) in plan.iter().zip(already).enumerate() {
-        if *done {
-            continue;
+fn mode_text(mode: CopyMode, args: &CopyArgs, sources: &[Disk]) -> String {
+    let why = if args.copy_mode == CopyMode::Auto { "chosen automatically" } else { "set by --copy-mode" };
+    match mode {
+        CopyMode::Pipeline => {
+            let readers = sources.iter().map(Disk::key).collect::<std::collections::BTreeSet<_>>().len();
+            let reader_text = if readers == 1 { "1 reader".to_string() } else { format!("{readers} readers, one per source disk") };
+            format!("pipeline ({reader_text}, 1 writer, sequential access to each disk; {why})")
         }
-        if files[*i].size >= LARGE_FILE {
-            large.push(k);
-        } else {
-            small.push(k);
-        }
+        _ => format!(
+            "parallel ({} threads for small files, {} for large; {why})",
+            args.threads, args.large_threads
+        ),
     }
-    large.sort_by_key(|&k| std::cmp::Reverse(files[plan[k].0].size));
-    let total_files = (small.len() + large.len()) as u64;
-
-    let mp = MultiProgress::new();
-    let stage = Stage::bytes("Copying", need);
-    let main = mp.add(stage.bar().clone());
-    let counter = progress::text_line(&mp);
-    let done = AtomicU64::new(0);
-    let failed = AtomicU64::new(0);
-    // Interrupted files count neither as done nor as errors.
-    let tick = |r: &io::Result<()>| {
-        let failed_now = match r {
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => return,
-            Err(_) => 1,
-            Ok(()) => 0,
-        };
-        let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-        let f = failed.fetch_add(failed_now, Ordering::Relaxed) + failed_now;
-        counter.set_message(format!("{}/{} files, {} errors", num(d), num(total_files), num(f)));
-    };
-    counter.set_message(format!("0/{} files, 0 errors", num(total_files)));
-
-    let results: Vec<OnceLock<Outcome>> = (0..plan.len()).map(|_| OnceLock::new()).collect();
-    let copy_small = |k: usize| {
-        let (i, dest) = &plan[k];
-        let f = &files[*i];
-        let r = copy_file(&f.path, dest, f.mtime);
-        main.inc(f.size);
-        tick(&r);
-        let _ = results[k].set(outcome(r));
-    };
-    let copy_large = |k: usize| {
-        let (i, dest) = &plan[k];
-        let f = &files[*i];
-        let name = f.path.file_name().unwrap_or_default().to_string_lossy();
-        let fb = progress::file_bar(&mp, &name, f.size);
-        let r = stream_file(&f.path, dest, f.mtime, |n| {
-            main.inc(n);
-            fb.inc(n);
-        });
-        fb.finish_and_clear();
-        mp.remove(&fb);
-        tick(&r);
-        let _ = results[k].set(outcome(r));
-    };
-
-    progress::set_graceful(true);
-    let (next_small, next_large) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    thread::scope(|s| {
-        run_lane(s, &small, lanes.small, &next_small, &copy_small);
-        run_lane(s, &large, lanes.large, &next_large, &copy_large);
-    });
-    progress::set_graceful(false);
-
-    counter.finish_and_clear();
-    mp.remove(&counter);
-    stage.finish(format!(
-        "{} files, {} written",
-        num(done.load(Ordering::Relaxed)),
-        human(main.position())
-    ));
-
-    results
-        .into_iter()
-        .zip(already)
-        .map(|(cell, &was_there)| match cell.into_inner() {
-            Some(o) => o,
-            None if was_there => Outcome::Already,
-            None => Outcome::Interrupted,
-        })
-        .collect()
-}
-
-/// Worker threads pulling jobs from a shared index until the lane is empty.
-fn run_lane<'scope, 'env, F>(
-    s: &'scope thread::Scope<'scope, 'env>,
-    jobs: &'env [usize],
-    threads: usize,
-    next: &'env AtomicUsize,
-    work: &'env F,
-) where
-    F: Fn(usize) + Sync,
-{
-    for _ in 0..threads.min(jobs.len()) {
-        s.spawn(move || {
-            while !progress::interrupted() {
-                let n = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&k) = jobs.get(n) else { break };
-                work(k);
-            }
-        });
-    }
-}
-
-fn outcome(r: io::Result<()>) -> Outcome {
-    match r {
-        Ok(()) => Outcome::Copied,
-        Err(e) if e.kind() == io::ErrorKind::Interrupted => Outcome::Interrupted,
-        Err(e) => Outcome::Failed(e.to_string()),
-    }
-}
-
-fn partial_path(dest: &Path) -> PathBuf {
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(PARTIAL_SUFFIX);
-    PathBuf::from(tmp)
-}
-
-/// Write to a temporary file and rename at the end, so an interrupted copy
-/// never leaves behind a file that looks complete.
-fn finish_copy(tmp: &Path, dest: &Path, mtime: SystemTime, res: io::Result<()>) -> io::Result<()> {
-    let res = res
-        .and_then(|_| filetime::set_file_mtime(tmp, FileTime::from_system_time(mtime)))
-        .and_then(|_| fs::rename(tmp, dest));
-    if res.is_err() {
-        let _ = fs::remove_file(tmp);
-    }
-    res
-}
-
-fn copy_file(src: &Path, dest: &Path, mtime: SystemTime) -> io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = partial_path(dest);
-    let res = fs::copy(src, &tmp).map(|_| ());
-    finish_copy(&tmp, dest, mtime, res)
-}
-
-/// Streams a large file in chunks, reporting progress after each one.
-/// The target is preallocated to its final size to limit fragmentation.
-fn stream_file(
-    src: &Path,
-    dest: &Path,
-    mtime: SystemTime,
-    on_progress: impl Fn(u64),
-) -> io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = partial_path(dest);
-    let res = (|| {
-        let mut input = File::open(src)?;
-        let size = input.metadata()?.len();
-        let mut output = File::create(&tmp)?;
-        output.set_len(size)?;
-        let mut buf = vec![0u8; CHUNK];
-        let mut written = 0u64;
-        loop {
-            if progress::interrupted() {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
-            }
-            let n = input.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            output.write_all(&buf[..n])?;
-            written += n as u64;
-            on_progress(n as u64);
-        }
-        // The source may have shrunk since we looked at it.
-        if written != size {
-            output.set_len(written)?;
-        }
-        Ok(())
-    })();
-    finish_copy(&tmp, dest, mtime, res)
 }

@@ -3,7 +3,9 @@ mod apply;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod av;
 mod cache;
+mod copier;
 mod copy;
+mod disk;
 mod dupes;
 mod filter;
 mod folders;
@@ -13,7 +15,7 @@ mod progress;
 mod report;
 mod scan;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Move documents, photos and videos between computers and find duplicates.
@@ -23,8 +25,8 @@ struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 
-    /// Threads for hashing (default: number of CPU cores). Copying has its own
-    /// --threads and --large-threads
+    /// Threads for hashing files on SSDs (default: number of CPU cores). Hard
+    /// drives are always hashed with one thread per disk
     #[arg(long, short, global = true)]
     jobs: Option<usize>,
 
@@ -85,13 +87,19 @@ pub struct CopyArgs {
     #[arg(long)]
     pub relative: bool,
 
-    /// Parallel copies of small files (under 16 MB). Small files are bound by
-    /// per-file overhead, so parallelism helps
+    /// How to copy: `pipeline` reads and writes each disk with one sequential
+    /// stream (best when a hard drive is involved), `parallel` uses many threads
+    /// (best for SSD -> SSD). `auto` picks by the detected disk types
+    #[arg(long, value_enum, default_value_t = CopyMode::Auto)]
+    pub copy_mode: CopyMode,
+
+    /// Parallel mode: copies of small files (under 16 MB) at once. Small files
+    /// are bound by per-file overhead, so parallelism helps
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
     pub threads: u16,
 
-    /// Parallel copies of large files. These are bound by drive bandwidth;
-    /// more parallel writes mostly add fragmentation
+    /// Parallel mode: copies of large files at once. These are bound by drive
+    /// bandwidth; more parallel writes mostly add fragmentation
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=16))]
     pub large_threads: u16,
 
@@ -101,6 +109,13 @@ pub struct CopyArgs {
 
     #[command(flatten)]
     pub filter: FilterArgs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CopyMode {
+    Auto,
+    Pipeline,
+    Parallel,
 }
 
 #[derive(Args)]

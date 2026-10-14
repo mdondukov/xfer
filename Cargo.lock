@@ -876,4 +876,5 @@ dependencies = [
  "redb",
  "tempfile",
  "walkdir",
+ "windows-sys",
 ]

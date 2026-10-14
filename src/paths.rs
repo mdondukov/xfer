@@ -1,6 +1,6 @@
 //! Paths: Windows long paths, display form, layout inside the target folder.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::path::{Component, Path, PathBuf, Prefix};
 
 /// Service folder inside the target: manifests and summaries of every run.
@@ -26,8 +26,7 @@ pub fn prepare_roots(args: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
     for a in args {
         let p = fix_arg(a);
-        let c = std::fs::canonicalize(&p)
-            .with_context(|| format!("cannot open {}", p.display()))?;
+        let c = std::fs::canonicalize(&p).map_err(|e| open_error(&p, e))?;
         if !c.is_dir() {
             bail!("{} is not a folder or a drive", display(&c));
         }
@@ -55,9 +54,24 @@ pub fn canonical_list(args: &[PathBuf]) -> Result<Vec<PathBuf>> {
     args.iter()
         .map(|a| {
             let p = fix_arg(a);
-            std::fs::canonicalize(&p).with_context(|| format!("cannot open {}", p.display()))
+            std::fs::canonicalize(&p).map_err(|e| open_error(&p, e))
         })
         .collect()
+}
+
+/// Explorer shows some folders under translated names that don't exist on disk
+/// ("Пользователи" is really "Users"), a common reason for "not found".
+const LOCALIZED_HINT: &str = "Explorer shows some folders under translated names: for example \
+\"Пользователи\" is really \"Users\" and \"Документы\" is \"Documents\". Click Explorer's \
+address bar or use Shift+right-click > \"Copy as path\" to get the real path.";
+
+fn open_error(p: &Path, e: std::io::Error) -> anyhow::Error {
+    let mut msg = format!("cannot open {}: {e}", p.display());
+    if cfg!(windows) && e.kind() == std::io::ErrorKind::NotFound {
+        msg.push('\n');
+        msg.push_str(LOCALIZED_HINT);
+    }
+    anyhow::anyhow!(msg)
 }
 
 /// Path for humans and CSV: without the `\\?\` prefix.

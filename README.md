@@ -31,6 +31,11 @@ This copies nothing. It prints a summary:
 Sources:
   C:\Users\Max
   D:\
+Disks:
+  C:\          source  SSD, physical disk 0
+  D:\          source  HDD, physical disk 1
+  E:\          target  HDD, physical disk 2
+Copy mode: pipeline (2 readers, one per source disk, 1 writer, sequential access to each disk; chosen automatically)
 Found: 182,410 files, 412.6 GB
 Filtered out (not whitelisted): 96,203 files, 38.1 GB
   .exe                    1,204 files      9.8 GB
@@ -215,25 +220,45 @@ leaves a one-line result when done:
 Scanning has no ETA because the total is unknown until it finishes; it shows the count and rate
 instead. Progress goes to stderr, so `xfer copy ... > summary.txt` captures a clean summary.
 
-## Speed and threads
+## Speed: hard drives, SSDs and copy modes
 
-Small and large files are copied in two lanes that run side by side:
-
-| Lane | Default | Why |
-|---|---|---|
-| Files under 16 MB | 8 threads (`--threads`) | time goes into per-file overhead (open, create, close, antivirus), so parallelism pays off |
-| Files of 16 MB and more | 2 threads (`--large-threads`), largest first | bound by drive bandwidth; more parallel writes mostly fragment the target |
-
-Large files are streamed in 4 MB chunks into a preallocated target file. Small files use the
-system copy (`CopyFileExW` on Windows).
-
-No thread count gets past the slowest link: a USB 3 external SSD tops out around 300-1000 MB/s.
-To tune for your hardware, copy a 10-20 GB sample with different settings and compare the
-times:
+xfer detects whether each source and the target are SSDs or hard drives, and prints it:
 
 ```
-xfer copy D:\Sample --to E:\test1 --threads 4
-xfer copy D:\Sample --to E:\test2 --threads 16
+Disks:
+  D:\          source  HDD, physical disk 1
+  F:\          target  HDD, physical disk 2
+Copy mode: pipeline (1 reader, 1 writer, sequential access to each disk; chosen automatically)
+```
+
+A hard drive has a single head. Several threads reading or writing the same HDD make it seek
+back and forth, and the total gets slower than one sequential stream. Different disks, on the
+other hand, don't get in each other's way. Hence two copy modes:
+
+| Mode | Used when | How it works |
+|---|---|---|
+| `pipeline` | any HDD is involved, or the disk type is unknown | One reader per source disk walks files in folder order (neighbouring files tend to sit close on the platter); one writer writes them in order. A queue of up to ~256 MB between them lets reading the next file overlap with writing the current one, so the total time approaches that of the slower disk rather than the sum of both. |
+| `parallel` | all disks are SSDs | Two lanes side by side: files under 16 MB in 8 threads (`--threads`), since they are bound by per-file overhead; larger files in 2 threads (`--large-threads`), largest first, since they are bound by bandwidth. |
+
+`--copy-mode pipeline` or `--copy-mode parallel` overrides the automatic choice. The type is
+read from the Windows "seek penalty" property, the same one the defragmenter uses, without admin
+rights. USB enclosures often hide it; such disks show as "unknown type, treated as HDD", because
+sequential access costs an SSD little while parallel access hurts an HDD a lot.
+
+The same rule applies elsewhere: sources on different physical disks are scanned in parallel,
+and with `--dedup` each hard drive is hashed by a single thread (SSDs use `--jobs` threads).
+
+Large files are written into a preallocated target file, which limits fragmentation.
+
+Rough expectations for a portable USB hard drive: large files at 80-120 MB/s, small files at a
+few hundred per second. No setting gets past the slowest disk, which is why `--only-useful` and
+`--dedup` are the biggest speed-ups: they cut what has to be copied at all.
+
+To compare settings on your hardware, copy a 10-20 GB sample in both modes:
+
+```
+xfer copy D:\Sample --to F:\test1 --copy-mode pipeline
+xfer copy D:\Sample --to F:\test2 --copy-mode parallel
 ```
 
 ## Antivirus
@@ -269,12 +294,13 @@ settings. Skip the check with `--no-av-check`.
 | `--exclude-ext a,b` | copy, dupes | always skip these extensions |
 | `--dry-run` | copy, apply | show what would happen, change nothing |
 | `--relative` | copy | put the source content directly into the target, without the drive letter |
-| `--threads <N>` | copy | parallel copies of small files, default 8 |
-| `--large-threads <N>` | copy | parallel copies of large files, default 2 |
+| `--copy-mode <m>` | copy | `auto` (default), `pipeline` or `parallel`, see [Speed](#speed-hard-drives-ssds-and-copy-modes) |
+| `--threads <N>` | copy | parallel mode: copies of small files at once, default 8 |
+| `--large-threads <N>` | copy | parallel mode: copies of large files at once, default 2 |
 | `--no-av-check` | copy | skip the antivirus check |
 | `--out <folder>` | dupes | where to write the report |
 | `-y, --yes` | apply | don't ask for confirmation |
-| `-j, --jobs <N>` | all | threads for hashing (default: CPU cores) |
+| `-j, --jobs <N>` | all | threads for hashing files on SSDs (default: CPU cores); hard drives always get one |
 | `--no-cache` | all | don't use the hash cache |
 
 ## How duplicates are found
@@ -315,6 +341,10 @@ cargo build --release --target x86_64-pc-windows-gnu   # on macOS, needs mingw-w
 ```
 
 ## Notes
+
+Explorer shows some folders under translated names that don't exist on disk: on a Russian
+Windows "Пользователи" is really `Users`, "Документы" is `Documents`. Click Explorer's address
+bar or use Shift+right-click > "Copy as path" to get the real path.
 
 In `cmd`, don't end a quoted path with a backslash: `"D:\Photos\"` reaches the program as
 `D:\Photos"`. xfer repairs this, but `"D:\Photos"` is safer.

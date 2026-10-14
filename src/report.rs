@@ -1,5 +1,6 @@
 //! Progress bars, number formatting and text summaries.
 
+use crate::disk::Disk;
 use crate::folders::{FolderKind, RedundantFolder};
 use crate::hashing::DupGroup;
 use crate::paths;
@@ -96,6 +97,30 @@ impl Text {
     }
 }
 
+/// Unreadable files listed in a dry run, where no errors.txt is written.
+const ERRORS_SHOWN: usize = 20;
+
+/// "Disks:" with the type of each source volume and of the target.
+pub fn disks_section(
+    out: &mut Text,
+    roots: &[PathBuf],
+    disks: &[Disk],
+    target: Option<(&Path, &Disk)>,
+) {
+    out.line("Disks:");
+    let mut seen = std::collections::BTreeSet::new();
+    for (r, d) in roots.iter().zip(disks) {
+        let name = if d.volume.is_empty() { paths::display(r) } else { d.volume.clone() };
+        if seen.insert(name.clone()) {
+            out.line(format!("  {name:<12} source  {}", d.describe()));
+        }
+    }
+    if let Some((t, d)) = target {
+        let name = if d.volume.is_empty() { paths::display(t) } else { d.volume.clone() };
+        out.line(format!("  {name:<12} target  {}", d.describe()));
+    }
+}
+
 pub fn sources(out: &mut Text, roots: &[PathBuf]) {
     out.line("Sources:");
     for r in roots {
@@ -103,7 +128,9 @@ pub fn sources(out: &mut Text, roots: &[PathBuf]) {
     }
 }
 
-pub fn scan_section(out: &mut Text, scan: &ScanResult, only_useful: bool) {
+/// `errors_file`: whether errors.txt gets written; if not (dry run), the
+/// unreadable files are listed right here.
+pub fn scan_section(out: &mut Text, scan: &ScanResult, only_useful: bool, errors_file: bool) {
     let total = scan.total();
     let filtered = scan.filtered_total();
     out.line(format!("Found: {}", stat(total)));
@@ -136,7 +163,18 @@ pub fn scan_section(out: &mut Text, scan: &ScanResult, only_useful: bool) {
         ));
     }
     if !scan.errors.is_empty() {
-        out.line(format!("Unreadable: {} (see errors.txt)", num(scan.errors.len() as u64)));
+        let n = scan.errors.len();
+        if errors_file {
+            out.line(format!("Unreadable: {} (see errors.txt)", num(n as u64)));
+        } else {
+            out.line(format!("Unreadable: {}", num(n as u64)));
+            for e in scan.errors.iter().take(ERRORS_SHOWN) {
+                out.line(format!("  {e}"));
+            }
+            if n > ERRORS_SHOWN {
+                out.line(format!("  ... and {} more", num((n - ERRORS_SHOWN) as u64)));
+            }
+        }
     }
 }
 
