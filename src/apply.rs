@@ -8,6 +8,7 @@
 use crate::ApplyArgs;
 use crate::hashing::{self, Hash};
 use crate::paths::{self, TRASH_DIR};
+use crate::progress::{self, Stage};
 use crate::report::{self, human, num};
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
@@ -75,16 +76,17 @@ pub fn run(args: &ApplyArgs) -> Result<()> {
     }
 
     // Verify: the group has a live copy and the files to move have not changed.
-    let pb = report::count_bar(work.len() as u64, "Verifying");
+    progress::set_stages(1);
+    let stage = Stage::count("Verifying", work.len() as u64);
     let checked: Vec<Result<Vec<usize>, String>> = work
         .par_iter()
         .map(|(hash, idx)| {
             let res = check_group(&rows, *hash, idx);
-            pb.inc(1);
+            stage.bar().inc(1);
             res
         })
         .collect();
-    pb.finish_and_clear();
+    stage.finish(format!("{} groups checked", num(work.len() as u64)));
 
     let mut to_move = Vec::new();
     for res in checked {
@@ -120,7 +122,13 @@ pub fn run(args: &ApplyArgs) -> Result<()> {
     let stamp = report::timestamp();
     let mut moved: HashMap<PathBuf, Vec<(String, PathBuf)>> = HashMap::new();
     let mut errors = Vec::new();
+    // Stop between files on Ctrl+C, so moved.csv still lists everything moved.
+    progress::set_graceful(true);
     for &i in &to_move {
+        if progress::interrupted() {
+            errors.push("interrupted: the remaining files were not moved".to_string());
+            break;
+        }
         let r = &rows[i];
         match quarantine(r, &stamp) {
             Ok((root, dest)) => moved.entry(root).or_default().push((r.path.clone(), dest)),

@@ -5,44 +5,11 @@ use crate::hashing::DupGroup;
 use crate::paths;
 use crate::scan::{FileEntry, ScanResult, Stat};
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-pub fn spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(120));
-    pb
-}
-
-pub fn count_bar(len: u64, msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new(len);
-    pb.set_style(
-        ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len} ({eta})")
-            .expect("valid template")
-            .progress_chars("=> "),
-    );
-    pb.set_message(msg.to_string());
-    pb
-}
-
-pub fn bytes_bar(len: u64, msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new(len);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{msg} [{bar:40}] {bytes}/{total_bytes} {bytes_per_sec} ({eta} left)",
-        )
-        .expect("valid template")
-        .progress_chars("=> "),
-    );
-    pb.set_message(msg.to_string());
-    pb
-}
 
 pub fn human(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -73,7 +40,8 @@ pub fn num(n: u64) -> String {
 }
 
 pub fn stat(s: Stat) -> String {
-    format!("{} files, {}", num(s.count), human(s.bytes))
+    let noun = if s.count == 1 { "file" } else { "files" };
+    format!("{} {noun}, {}", num(s.count), human(s.bytes))
 }
 
 pub fn percent(part: u64, whole: u64) -> String {

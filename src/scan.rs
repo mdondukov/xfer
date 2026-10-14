@@ -2,6 +2,7 @@
 
 use crate::filter::{self, Category, Decision, Filter};
 use crate::paths;
+use crate::progress::{self, Stage};
 use crate::report;
 use std::collections::BTreeMap;
 use std::fs::Metadata;
@@ -63,9 +64,10 @@ impl ScanResult {
 
 /// `exclude` - folders not to descend into (a target folder inside a source).
 pub fn scan(roots: &[PathBuf], filter: &Filter, exclude: &[PathBuf]) -> ScanResult {
-    let pb = report::spinner("Scanning");
+    let stage = Stage::spinner("Scanning");
     let mut res = ScanResult::default();
     let mut seen: u64 = 0;
+    let mut seen_bytes: u64 = 0;
 
     for (ri, root) in roots.iter().enumerate() {
         let mut skipped = Vec::new();
@@ -113,8 +115,11 @@ pub fn scan(roots: &[PathBuf], filter: &Filter, exclude: &[PathBuf]) -> ScanResu
                 continue;
             }
             seen += 1;
-            if seen.is_multiple_of(2000) {
-                pb.set_message(format!("Scanning: {} files", report::num(seen)));
+            seen_bytes += size;
+            if seen.is_multiple_of(500) {
+                stage
+                    .bar()
+                    .set_message(progress::found_message(seen, seen_bytes, stage.elapsed()));
             }
             match filter.decide(entry.path()) {
                 Decision::Drop { ext } => {
@@ -132,7 +137,11 @@ pub fn scan(roots: &[PathBuf], filter: &Filter, exclude: &[PathBuf]) -> ScanResu
         }
         res.skipped_dirs.extend(skipped);
     }
-    pb.finish_and_clear();
+    stage.finish(format!(
+        "{} files, {}",
+        report::num(seen),
+        report::human(seen_bytes)
+    ));
     res
 }
 

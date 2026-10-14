@@ -6,6 +6,7 @@ use crate::filter::Filter;
 use crate::folders::{self, RedundantFolder};
 use crate::hashing::{self, DupGroup, to_hex};
 use crate::paths;
+use crate::progress::{self, Stage};
 use crate::report::{self, Text, human, num};
 use crate::scan::{self, FileEntry};
 use anyhow::Result;
@@ -30,7 +31,7 @@ pub fn analyze(
     let prefer = paths::canonical_list(prefer)?;
     let cache = HashCache::open(no_cache);
     let (groups, errors) = hashing::find_duplicates(files, &cache);
-    let pb = report::spinner("Analyzing folders");
+    let stage = Stage::spinner("Folders");
     let mut folders = folders::analyze(files, &groups, roots);
     let inside = folders::inside_redundant(files, &folders);
     let keepers: Vec<usize> = groups
@@ -38,12 +39,17 @@ pub fn analyze(
         .map(|g| hashing::pick_keeper(g, files, &prefer, &inside))
         .collect();
     folders::attach_keepers(&mut folders, files, &keepers, roots);
-    pb.finish_and_clear();
+    stage.finish(format!(
+        "{} duplicate groups, {} duplicate folders",
+        report::num(groups.len() as u64),
+        report::num(folders.len() as u64)
+    ));
     Ok(Dedup { groups, keepers, folders, errors })
 }
 
 pub fn run(args: &DupesArgs, no_cache: bool) -> Result<()> {
     let roots = paths::prepare_roots(&args.paths)?;
+    progress::set_stages(4);
     let filter = Filter::new(&args.filter);
     let scan = scan::scan(&roots, &filter, &[]);
     let files = &scan.files;

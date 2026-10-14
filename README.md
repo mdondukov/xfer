@@ -84,8 +84,8 @@ get `C:\transfer\C\Users\Max\...`, not `C:\transfer\E\transfer\C\...`.
 
 Tips:
 
-- Add the target folder to Windows Defender exclusions for the duration of the copy. Scanning
-  every written file slows copying down noticeably.
+- Before copying, xfer checks for real-time antivirus scanning and, if it is on, prints the
+  commands to exclude `xfer.exe` for the duration of the transfer (see [Antivirus](#antivirus)).
 - Format the external drive as NTFS, not exFAT.
 
 ### 2. Copy folders exactly as they are
@@ -99,9 +99,13 @@ xfer copy "D:\Work\Project X" --to E:\transfer
 Without `--dedup` and `--only-useful`, every file is copied. Add `--exclude-ext iso,tmp` to drop
 specific extensions.
 
-### 3. Resume an interrupted copy
+### 3. Stop and resume a copy
 
-Run the same command again. Files already in place (same size and modification time) are
+Press Ctrl+C once: xfer finishes the small files in progress, stops large files mid-way, and
+still writes the manifest and summary. Files not copied yet are listed as
+`not-copied (interrupted)`. Press Ctrl+C a second time to quit immediately.
+
+To continue, run the same command again. Files already in place (same size and modification time) are
 skipped, and the summary shows how much was copied earlier. A file that was cut off mid-copy is
 left as `<name>.xfer-partial` and gets overwritten.
 
@@ -192,6 +196,67 @@ system folders at a drive root: `Windows`, `Program Files`, `ProgramData`, `Reco
 The recycle bin and `System Volume Information` are always skipped. OneDrive cloud-only files are
 skipped too, so they don't trigger a download; the summary counts them separately.
 
+## Progress
+
+Every command runs as numbered stages. Each stage shows a bar with speed and time left, and
+leaves a one-line result when done:
+
+```
+  [1/5] Scanning     done: 182,410 files, 412.6 GB (0:21)
+  [2/5] Quick check  done: 64,800 files with a same-size twin, 31,200 need a full hash (0:12)
+  [3/5] Hashing      done: 96.0 GB hashed, 0 from cache (3:05)
+  [4/5] Folders      done: 24,113 duplicate groups, 37 duplicate folders (0:02)
+  [5/5] Copying      [=========>          ] 98.3 GiB/249.4 GiB 185 MiB/s (13:40 left)
+      52,301/140,830 files, 0 errors
+      > wedding.mp4 2.1 GiB/4.1 GiB
+      > trip-2019.mov 0.4 GiB/1.8 GiB
+```
+
+Scanning has no ETA because the total is unknown until it finishes; it shows the count and rate
+instead. Progress goes to stderr, so `xfer copy ... > summary.txt` captures a clean summary.
+
+## Speed and threads
+
+Small and large files are copied in two lanes that run side by side:
+
+| Lane | Default | Why |
+|---|---|---|
+| Files under 16 MB | 8 threads (`--threads`) | time goes into per-file overhead (open, create, close, antivirus), so parallelism pays off |
+| Files of 16 MB and more | 2 threads (`--large-threads`), largest first | bound by drive bandwidth; more parallel writes mostly fragment the target |
+
+Large files are streamed in 4 MB chunks into a preallocated target file. Small files use the
+system copy (`CopyFileExW` on Windows).
+
+No thread count gets past the slowest link: a USB 3 external SSD tops out around 300-1000 MB/s.
+To tune for your hardware, copy a 10-20 GB sample with different settings and compare the
+times:
+
+```
+xfer copy D:\Sample --to E:\test1 --threads 4
+xfer copy D:\Sample --to E:\test2 --threads 16
+```
+
+## Antivirus
+
+Real-time scanning checks every file xfer reads and writes, which noticeably slows down copying
+many small files. Before copying, xfer asks Windows whether Microsoft Defender real-time
+protection or another antivirus is on, and if so prints something like:
+
+```
+Note: Microsoft Defender real-time protection is on. It scans every file xfer
+reads and writes, which noticeably slows down copying many small files.
+To exclude xfer for the duration of the transfer, run in an admin PowerShell:
+  Add-MpPreference -ExclusionProcess "C:\Tools\xfer.exe"
+and remove the exclusion when done:
+  Remove-MpPreference -ExclusionProcess "C:\Tools\xfer.exe"
+```
+
+xfer never changes security settings itself. On managed PCs policy would block it anyway, and an
+exclusion left behind by an interrupted run would stay forever. A process exclusion is
+suggested rather than a folder one because it covers both reading on the old PC and writing to
+the external drive. For other antivirus products, add `xfer.exe` to exclusions in their
+settings. Skip the check with `--no-av-check`.
+
 ## Options
 
 | Option | Commands | Meaning |
@@ -204,9 +269,12 @@ skipped too, so they don't trigger a download; the summary counts them separatel
 | `--exclude-ext a,b` | copy, dupes | always skip these extensions |
 | `--dry-run` | copy, apply | show what would happen, change nothing |
 | `--relative` | copy | put the source content directly into the target, without the drive letter |
+| `--threads <N>` | copy | parallel copies of small files, default 8 |
+| `--large-threads <N>` | copy | parallel copies of large files, default 2 |
+| `--no-av-check` | copy | skip the antivirus check |
 | `--out <folder>` | dupes | where to write the report |
 | `-y, --yes` | apply | don't ask for confirmation |
-| `-j, --jobs <N>` | all | files processed in parallel (default: CPU cores) |
+| `-j, --jobs <N>` | all | threads for hashing (default: CPU cores) |
 | `--no-cache` | all | don't use the hash cache |
 
 ## How duplicates are found

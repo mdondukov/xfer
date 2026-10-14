@@ -3,6 +3,7 @@
 
 use crate::cache::HashCache;
 use crate::paths;
+use crate::progress::Stage;
 use crate::report;
 use crate::scan::FileEntry;
 use rayon::prelude::*;
@@ -70,27 +71,28 @@ pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>
     }
     let mut need_full = Vec::new();
     let mut need_partial = Vec::new();
+    let mut small = 0usize;
     for (size, idx) in by_size {
         if idx.len() < 2 {
             continue;
         }
         if size < PARTIAL_MIN {
+            small += idx.len();
             need_full.extend(idx);
         } else {
             need_partial.extend(idx);
         }
     }
 
-    let pb = report::count_bar(need_partial.len() as u64, "Quick check");
+    let stage = Stage::count("Quick check", need_partial.len() as u64);
     let partial: Vec<(usize, io::Result<Hash>)> = need_partial
         .par_iter()
         .map(|&i| {
             let r = partial_hash(&files[i].path, files[i].size);
-            pb.inc(1);
+            stage.bar().inc(1);
             (i, r)
         })
         .collect();
-    pb.finish_and_clear();
     let mut by_partial: HashMap<(u64, Hash), Vec<usize>> = HashMap::new();
     for (i, r) in partial {
         match r {
@@ -103,11 +105,17 @@ pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>
             need_full.extend(idx);
         }
     }
+    stage.finish(format!(
+        "{} files with a same-size twin, {} need a full hash",
+        report::num(need_partial.len() as u64 + small as u64),
+        report::num(need_full.len() as u64)
+    ));
 
     let entries: Vec<&FileEntry> = need_full.iter().map(|&i| &files[i]).collect();
     let cached = cache.get_many(&entries);
     let mut full: Vec<(usize, Hash)> = Vec::with_capacity(need_full.len());
     let mut todo = Vec::new();
+    let cached_count = cached.iter().filter(|c| c.is_some()).count();
     for (&i, hit) in need_full.iter().zip(cached) {
         match hit {
             Some(h) => full.push((i, h)),
@@ -116,16 +124,20 @@ pub fn find_duplicates(files: &[FileEntry], cache: &HashCache) -> (Vec<DupGroup>
     }
 
     let total: u64 = todo.iter().map(|&i| files[i].size).sum();
-    let pb = report::bytes_bar(total, "Hashing");
+    let stage = Stage::bytes("Hashing", total);
     let computed: Vec<(usize, io::Result<Hash>)> = todo
         .par_iter()
         .map(|&i| {
             let r = hash_file(&files[i].path);
-            pb.inc(files[i].size);
+            stage.bar().inc(files[i].size);
             (i, r)
         })
         .collect();
-    pb.finish_and_clear();
+    stage.finish(format!(
+        "{} hashed, {} from cache",
+        report::human(total),
+        report::num(cached_count as u64)
+    ));
     let mut fresh = Vec::new();
     for (i, r) in computed {
         match r {

@@ -1,4 +1,7 @@
 mod apply;
+// Detection only runs on Windows; parsing is tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod av;
 mod cache;
 mod copy;
 mod dupes;
@@ -6,6 +9,7 @@ mod filter;
 mod folders;
 mod hashing;
 mod paths;
+mod progress;
 mod report;
 mod scan;
 
@@ -19,7 +23,8 @@ struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 
-    /// How many files to process in parallel (default: number of CPU cores)
+    /// Threads for hashing (default: number of CPU cores). Copying has its own
+    /// --threads and --large-threads
     #[arg(long, short, global = true)]
     jobs: Option<usize>,
 
@@ -80,6 +85,20 @@ pub struct CopyArgs {
     #[arg(long)]
     pub relative: bool,
 
+    /// Parallel copies of small files (under 16 MB). Small files are bound by
+    /// per-file overhead, so parallelism helps
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
+    pub threads: u16,
+
+    /// Parallel copies of large files. These are bound by drive bandwidth;
+    /// more parallel writes mostly add fragmentation
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=16))]
+    pub large_threads: u16,
+
+    /// Skip the antivirus check before copying
+    #[arg(long)]
+    pub no_av_check: bool,
+
     #[command(flatten)]
     pub filter: FilterArgs,
 }
@@ -126,6 +145,7 @@ fn default_target() -> PathBuf {
 
 fn main() {
     let cli = Cli::parse();
+    progress::install_ctrlc();
     if let Some(jobs) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(jobs.max(1))
