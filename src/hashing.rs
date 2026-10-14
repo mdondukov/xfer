@@ -238,7 +238,8 @@ pub fn pick_keeper(
 fn exit_if_interrupted(cache: &HashCache) {
     if progress::interrupted() {
         cache.flush();
-        eprintln!("\nStopped. Hashes computed so far are saved and will be reused by the next run.");
+        progress::abandon_stage();
+        eprintln!("Stopped. Hashes computed so far are saved and will be reused by the next run.");
         std::process::exit(130);
     }
 }

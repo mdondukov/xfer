@@ -6,6 +6,7 @@
 use crate::report::{human, num};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fmt::Display;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,9 @@ static STAGE: AtomicUsize = AtomicUsize::new(0);
 static STAGES: AtomicUsize = AtomicUsize::new(0);
 static GRACEFUL: AtomicBool = AtomicBool::new(false);
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// The bar of the running stage. Messages printed while it is drawn must go
+/// through it, or the next redraw paints over them.
+static CURRENT: Mutex<Option<ProgressBar>> = Mutex::new(None);
 
 /// ASCII only: the legacy Windows console has no glyphs for braille spinners.
 const TICKS: &str = "|/-\\ ";
@@ -73,6 +77,7 @@ impl Stage {
         );
         pb.set_prefix(label.clone());
         pb.enable_steady_tick(Duration::from_millis(150));
+        *CURRENT.lock().expect("progress lock") = Some(pb.clone());
         Stage { pb, label, started: Instant::now() }
     }
 
@@ -85,6 +90,7 @@ impl Stage {
     }
 
     pub fn finish(self, summary: impl Display) {
+        CURRENT.lock().expect("progress lock").take();
         self.pb.finish_and_clear();
         if !self.pb.is_hidden() {
             eprintln!(
@@ -151,11 +157,27 @@ fn short(name: &str, max: usize) -> String {
 pub fn install_ctrlc() {
     let _ = ctrlc::set_handler(|| {
         if GRACEFUL.load(Ordering::SeqCst) && !INTERRUPTED.swap(true, Ordering::SeqCst) {
-            eprintln!("\nStopping after the files in progress... Press Ctrl+C again to quit now.");
+            say("Stopping after the files in progress... Press Ctrl+C again to quit now.");
         } else {
             std::process::exit(130);
         }
     });
+}
+
+/// Prints a line above the running stage's bar, or plainly if none is drawn.
+pub fn say(msg: &str) {
+    match CURRENT.lock().expect("progress lock").as_ref() {
+        Some(pb) if !pb.is_hidden() => pb.println(msg),
+        _ => eprintln!("{msg}"),
+    }
+}
+
+/// Freezes the running stage's bar where it is, so that a final message
+/// printed before exiting stays below it.
+pub fn abandon_stage() {
+    if let Some(pb) = CURRENT.lock().expect("progress lock").take() {
+        pb.abandon();
+    }
 }
 
 pub fn set_graceful(on: bool) {
