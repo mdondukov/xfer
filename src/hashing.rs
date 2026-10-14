@@ -4,11 +4,12 @@
 use crate::cache::HashCache;
 use crate::disk::Disk;
 use crate::paths;
-use crate::progress::Stage;
+use crate::progress::{self, Stage};
 use crate::report;
 use crate::scan::FileEntry;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 pub type Hash = [u8; 32];
 
 const PARTIAL_BLOCK: u64 = 16 * 1024;
+const HASH_CHUNK: usize = 1024 * 1024;
 /// Files smaller than this are hashed in full right away: two passes cost more than one.
 const PARTIAL_MIN: u64 = 4 * PARTIAL_BLOCK;
 
@@ -35,8 +37,28 @@ impl DupGroup {
 }
 
 pub fn hash_file(path: &Path) -> io::Result<Hash> {
+    hash_file_with(path, |_| {})
+}
+
+/// Hashes in 1 MB chunks, reporting progress after each one, so a multi-GB video
+/// moves the bar smoothly and Ctrl+C doesn't have to wait for it to finish.
+fn hash_file_with(path: &Path, on_progress: impl Fn(u64)) -> io::Result<Hash> {
+    let mut f = File::open(path)?;
+    let mut buf = vec![0u8; HASH_CHUNK];
     let mut h = blake3::Hasher::new();
-    h.update_reader(File::open(path)?)?;
+    loop {
+        if progress::interrupted() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped by Ctrl+C"));
+        }
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        h.update(&buf[..n]);
+        on_progress(n as u64);
+    }
     Ok(*h.finalize().as_bytes())
 }
 
@@ -91,12 +113,18 @@ pub fn find_duplicates(
         }
     }
 
+    // Ctrl+C stops after the files in progress; what was hashed stays in the cache.
+    progress::set_graceful(true);
     let stage = Stage::count("Quick check", need_partial.len() as u64);
     let partial = per_disk(&need_partial, files, disks, |i| {
+        if progress::interrupted() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped by Ctrl+C"));
+        }
         let r = partial_hash(&files[i].path, files[i].size);
         stage.bar().inc(1);
         r
     });
+    exit_if_interrupted(cache);
     let mut by_partial: HashMap<(u64, Hash), Vec<usize>> = HashMap::new();
     for (i, r) in partial {
         match r {
@@ -129,27 +157,35 @@ pub fn find_duplicates(
 
     let total: u64 = todo.iter().map(|&i| files[i].size).sum();
     let stage = Stage::bytes("Hashing", total);
+    let hashed = AtomicU64::new(0);
+    let todo_count = report::num(todo.len() as u64);
+    stage.bar().set_message(format!("0/{todo_count} files"));
     let computed = per_disk(&todo, files, disks, |i| {
-        let r = hash_file(&files[i].path);
-        stage.bar().inc(files[i].size);
+        let f = &files[i];
+        let r = hash_file_with(&f.path, |n| stage.bar().inc(n));
+        if let Ok(h) = &r {
+            cache.put(f, h);
+        }
+        if !progress::interrupted() {
+            let n = hashed.fetch_add(1, Ordering::Relaxed) + 1;
+            stage.bar().set_message(format!("{}/{todo_count} files", report::num(n)));
+        }
         r
     });
+    exit_if_interrupted(cache);
+    progress::set_graceful(false);
+    cache.flush();
     stage.finish(format!(
         "{} hashed, {} from cache",
         report::human(total),
         report::num(cached_count as u64)
     ));
-    let mut fresh = Vec::new();
     for (i, r) in computed {
         match r {
-            Ok(h) => {
-                full.push((i, h));
-                fresh.push((&files[i], h));
-            }
+            Ok(h) => full.push((i, h)),
             Err(e) => errors.push(read_error(&files[i].path, &e)),
         }
     }
-    cache.put_many(&fresh);
 
     let mut by_full: HashMap<(u64, Hash), Vec<usize>> = HashMap::new();
     for (i, h) in full {
@@ -225,6 +261,16 @@ pub fn pick_keeper(
             )
         })
         .expect("a duplicate group has at least two files")
+}
+
+/// After Ctrl+C while hashing: save what was hashed and stop. A rerun picks
+/// up from the cache, so nothing hashed so far is lost.
+fn exit_if_interrupted(cache: &HashCache) {
+    if progress::interrupted() {
+        cache.flush();
+        eprintln!("\nStopped. Hashes computed so far are saved and will be reused by the next run.");
+        std::process::exit(130);
+    }
 }
 
 fn read_error(path: &Path, e: &io::Error) -> String {

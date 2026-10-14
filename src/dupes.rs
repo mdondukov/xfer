@@ -53,6 +53,9 @@ pub fn run(args: &DupesArgs, no_cache: bool) -> Result<()> {
     let roots = paths::prepare_roots(&args.paths)?;
     progress::set_stages(4);
     let disks: Vec<Disk> = roots.iter().map(|r| disk::probe(r)).collect();
+    let mut head = Text::default();
+    report::disks_section(&mut head, &roots, &disks, None);
+    eprint!("{}", head.0);
     let filter = Filter::new(&args.filter);
     let scan = scan::scan(&roots, &disks, &filter, &[]);
     let files = &scan.files;

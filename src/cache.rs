@@ -1,32 +1,50 @@
 //! Full-hash cache shared between runs. Key: path; value: size, mtime and hash.
 //! An entry whose size or mtime no longer matches the file is treated as stale.
+//!
+//! New hashes are buffered and committed every few seconds, so an interrupted
+//! run keeps what it already hashed; on a hard drive that can be hours of work.
 
 use crate::hashing::Hash;
 use crate::scan::FileEntry;
 use anyhow::{Context, Result};
 use redb::{Database, ReadableDatabase, TableDefinition};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("hashes");
 const VALUE_LEN: usize = 8 + 16 + 32;
 
+/// Commit buffered hashes at least this often...
+const FLUSH_EVERY: Duration = Duration::from_secs(10);
+/// ...or once this many have piled up.
+const FLUSH_BATCH: usize = 1000;
+
 pub struct HashCache {
     db: Option<Database>,
+    pending: Mutex<Pending>,
+}
+
+struct Pending {
+    items: Vec<(String, [u8; VALUE_LEN])>,
+    last_flush: Instant,
 }
 
 impl HashCache {
     pub fn open(disabled: bool) -> Self {
-        if disabled {
-            return HashCache { db: None };
-        }
-        match open_db() {
-            Ok(db) => HashCache { db: Some(db) },
-            Err(e) => {
-                eprintln!("Hash cache unavailable ({e:#}), continuing without it");
-                HashCache { db: None }
+        let db = if disabled {
+            None
+        } else {
+            match open_db() {
+                Ok(db) => Some(db),
+                Err(e) => {
+                    eprintln!("Hash cache unavailable ({e:#}), continuing without it");
+                    None
+                }
             }
-        }
+        };
+        let pending = Pending { items: Vec::new(), last_flush: Instant::now() };
+        HashCache { db, pending: Mutex::new(pending) }
     }
 
     pub fn get_many(&self, files: &[&FileEntry]) -> Vec<Option<Hash>> {
@@ -47,15 +65,40 @@ impl HashCache {
         lookup().unwrap_or_else(|_| vec![None; files.len()])
     }
 
-    pub fn put_many(&self, items: &[(&FileEntry, Hash)]) {
+    /// Buffers one fresh hash; safe to call from many threads.
+    pub fn put(&self, f: &FileEntry, h: &Hash) {
+        if self.db.is_none() {
+            return;
+        }
+        let batch = {
+            let mut p = self.pending.lock().expect("cache lock");
+            p.items.push((f.path.to_string_lossy().into_owned(), encode(f, h)));
+            if p.items.len() < FLUSH_BATCH && p.last_flush.elapsed() < FLUSH_EVERY {
+                return;
+            }
+            p.last_flush = Instant::now();
+            std::mem::take(&mut p.items)
+        };
+        self.write(&batch);
+    }
+
+    /// Commits everything buffered so far.
+    pub fn flush(&self) {
+        let batch = std::mem::take(&mut self.pending.lock().expect("cache lock").items);
+        self.write(&batch);
+    }
+
+    fn write(&self, items: &[(String, [u8; VALUE_LEN])]) {
         let Some(db) = &self.db else { return };
+        if items.is_empty() {
+            return;
+        }
         let store = || -> Result<()> {
             let tx = db.begin_write()?;
             {
                 let mut table = tx.open_table(TABLE)?;
-                for (f, h) in items {
-                    let key = f.path.to_string_lossy();
-                    table.insert(key.as_ref(), &encode(f, h)[..])?;
+                for (key, value) in items {
+                    table.insert(key.as_str(), &value[..])?;
                 }
             }
             tx.commit()?;
@@ -64,6 +107,12 @@ impl HashCache {
         if let Err(e) = store() {
             eprintln!("Failed to save hash cache: {e:#}");
         }
+    }
+}
+
+impl Drop for HashCache {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 

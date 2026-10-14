@@ -110,6 +110,10 @@ Press Ctrl+C once: xfer finishes the small files in progress, stops large files 
 still writes the manifest and summary. Files not copied yet are listed as
 `not-copied (interrupted)`. Press Ctrl+C a second time to quit immediately.
 
+Ctrl+C while hashing (with `--dedup` or in `xfer dupes`) works the same way: hashes computed so
+far are saved to the cache every few seconds, and the next run reuses them instead of reading
+those files again.
+
 To continue, run the same command again. Files already in place (same size and modification time) are
 skipped, and the summary shows how much was copied earlier. A file that was cut off mid-copy is
 left as `<name>.xfer-partial` and gets overwritten.

@@ -59,7 +59,7 @@ impl Stage {
         Self::new(
             name,
             ProgressBar::new(len),
-            "  {prefix} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec} ({eta} left)",
+            "  {prefix} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec} ({eta} left) {msg}",
         )
     }
 

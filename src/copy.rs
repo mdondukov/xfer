@@ -64,6 +64,12 @@ pub fn run(args: &CopyArgs, no_cache: bool) -> Result<()> {
         m => m,
     };
 
+    // Shown up front, so a misdetected disk is visible before hours of work.
+    let mut head = Text::default();
+    report::disks_section(&mut head, &roots, &source_disks, Some((&target_arg, &target_disk)));
+    head.line(format!("Copy mode: {}", mode_text(mode, args, &source_disks)));
+    eprint!("{}", head.0);
+
     let filter = Filter::new(&args.filter);
     let scan = scan::scan(&roots, &source_disks, &filter, &exclude);
     if let Some(text) = av_check.and_then(|h| h.join().ok()).flatten() {
