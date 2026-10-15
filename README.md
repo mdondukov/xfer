@@ -225,14 +225,17 @@ leaves a one-line result when done:
   [2/5] Quick check  done: 64,800 files with a same-size twin, 31,200 need a full hash (0:12)
   [3/5] Hashing      done: 96.0 GB hashed, 0 from cache (3:05)
   [4/5] Folders      done: 24,113 duplicate groups, 37 duplicate folders (0:02)
-  [5/5] Copying      [=========>          ] 98.3 GiB/249.4 GiB 185 MiB/s (13:40 left)
-      52,301/140,830 files, 0 errors
+  [5/5] Copying      [=========>          ] 98.3 GiB/249.4 GiB 185.20 MiB/s (13m left)
+      52,301/140,830 files (96.4 files/s), 0 errors
       > wedding.mp4 2.1 GiB/4.1 GiB
       > trip-2019.mov 0.4 GiB/1.8 GiB
 ```
 
 Scanning has no ETA because the total is unknown until it finishes; it shows the count and rate
-instead. Progress goes to stderr, so `xfer copy ... > summary.txt` captures a clean summary.
+instead. Speed and time left are averaged over the whole stage: on hard drives the momentary
+speed swings between a large video (~100 MB/s) and a folder of small documents (well under
+1 MB/s), so a short-window estimate would jump between minutes and weeks. The first few seconds
+show `?` until there is enough data. Progress goes to stderr, so `xfer copy ... > summary.txt` captures a clean summary.
 
 ## Speed: hard drives, SSDs and copy modes
 

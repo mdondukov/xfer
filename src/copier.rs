@@ -66,8 +66,8 @@ struct Ui {
 impl Ui {
     fn new(need: u64, total: u64) -> Ui {
         let mp = MultiProgress::new();
-        let stage = Stage::bytes("Copying", need);
-        let main = mp.add(stage.bar().clone());
+        let stage = Stage::bytes_in(Some(&mp), "Copying", need);
+        let main = stage.bar().clone();
         let counter = progress::text_line(&mp);
         counter.set_message(format!("0/{} files, 0 errors", num(total)));
         Ui { mp, stage, main, counter, done: AtomicU64::new(0), failed: AtomicU64::new(0), total }
@@ -82,8 +82,14 @@ impl Ui {
         };
         let d = self.done.fetch_add(1, Ordering::Relaxed) + 1;
         let f = self.failed.fetch_add(failed_now, Ordering::Relaxed) + failed_now;
-        self.counter
-            .set_message(format!("{}/{} files, {} errors", num(d), num(self.total), num(f)));
+        let secs = self.stage.elapsed().as_secs_f64().max(1.0);
+        self.counter.set_message(format!(
+            "{}/{} files ({:.1} files/s), {} errors",
+            num(d),
+            num(self.total),
+            d as f64 / secs,
+            num(f)
+        ));
     }
 
     fn file_bar(&self, f: &FileEntry) -> ProgressBar {

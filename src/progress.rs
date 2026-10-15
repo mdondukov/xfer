@@ -4,7 +4,7 @@
 //! so redirecting stdout to a file captures a clean summary.
 
 use crate::report::{human, num};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use std::fmt::Display;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -46,6 +46,7 @@ impl Stage {
     pub fn spinner(name: &str) -> Stage {
         Self::new(
             name,
+            None,
             ProgressBar::new_spinner(),
             "{spinner} {prefix} {msg} ({elapsed})",
         )
@@ -54,24 +55,39 @@ impl Stage {
     pub fn count(name: &str, len: u64) -> Stage {
         Self::new(
             name,
+            None,
             ProgressBar::new(len),
-            "  {prefix} [{bar:30}] {human_pos}/{human_len} files ({eta} left)",
+            "  {prefix} [{bar:30}] {human_pos}/{human_len} files ({avg_eta} left)",
         )
     }
 
     pub fn bytes(name: &str, len: u64) -> Stage {
+        Self::bytes_in(None, name, len)
+    }
+
+    /// A bytes stage drawn as the first line of `mp` (the copy bar with
+    /// per-file bars under it). Added before its first draw, so no stray
+    /// copy of the bar is left above the group.
+    pub fn bytes_in(mp: Option<&MultiProgress>, name: &str, len: u64) -> Stage {
         Self::new(
             name,
+            mp,
             ProgressBar::new(len),
-            "  {prefix} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec} ({eta} left) {msg}",
+            "  {prefix} [{bar:30}] {bytes}/{total_bytes} {avg_rate} ({avg_eta} left) {msg}",
         )
     }
 
-    fn new(name: &str, pb: ProgressBar, template: &str) -> Stage {
+    fn new(name: &str, mp: Option<&MultiProgress>, pb: ProgressBar, template: &str) -> Stage {
         let label = next_label(name);
+        let pb = match mp {
+            Some(mp) => mp.add(pb),
+            None => pb,
+        };
         pb.set_style(
             ProgressStyle::with_template(template)
                 .expect("valid template")
+                .with_key("avg_rate", avg_rate)
+                .with_key("avg_eta", avg_eta)
                 .tick_chars(TICKS)
                 .progress_chars(BAR),
         );
@@ -99,6 +115,51 @@ impl Stage {
                 duration(self.started.elapsed())
             );
         }
+    }
+}
+
+/// Average speed since the stage started. indicatif's own `{bytes_per_sec}`
+/// and `{eta}` follow the last few seconds, which on hard drives swing between
+/// a large video and a folder of tiny documents (100 MB/s vs 50 KB/s), so
+/// the ETA jumped between minutes and weeks.
+fn avg_rate(state: &ProgressState, w: &mut dyn std::fmt::Write) {
+    match average(state) {
+        Some(rate) => {
+            let _ = write!(w, "{}/s", HumanBytes(rate as u64));
+        }
+        None => {
+            let _ = w.write_str("-/s");
+        }
+    }
+}
+
+fn avg_eta(state: &ProgressState, w: &mut dyn std::fmt::Write) {
+    let left = state.len().unwrap_or(0).saturating_sub(state.pos());
+    match average(state) {
+        Some(rate) if rate > 0.0 => {
+            let _ = w.write_str(&eta(Duration::from_secs_f64(left as f64 / rate)));
+        }
+        _ => {
+            let _ = w.write_str("?");
+        }
+    }
+}
+
+/// Units per second since the start; `None` during the first seconds, when
+/// there is too little data for a meaningful average.
+fn average(state: &ProgressState) -> Option<f64> {
+    let secs = state.elapsed().as_secs_f64();
+    (secs >= 5.0 && state.pos() > 0).then(|| state.pos() as f64 / secs)
+}
+
+/// "45s", "12m", "3h 05m", "2d 04h"
+fn eta(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        3600..86400 => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+        _ => format!("{}d {:02}h", s / 86400, s / 3600 % 24),
     }
 }
 
@@ -197,6 +258,14 @@ mod tests {
         assert_eq!(duration(Duration::from_secs(21)), "0:21");
         assert_eq!(duration(Duration::from_secs(820)), "13:40");
         assert_eq!(duration(Duration::from_secs(3903)), "1:05:03");
+    }
+
+    #[test]
+    fn formats_eta() {
+        assert_eq!(eta(Duration::from_secs(45)), "45s");
+        assert_eq!(eta(Duration::from_secs(750)), "12m");
+        assert_eq!(eta(Duration::from_secs(3 * 3600 + 5 * 60)), "3h 05m");
+        assert_eq!(eta(Duration::from_secs(2 * 86400 + 4 * 3600)), "2d 04h");
     }
 
     #[test]
